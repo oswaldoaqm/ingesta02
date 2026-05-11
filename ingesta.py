@@ -1,60 +1,79 @@
-import boto3
-import mysql.connector
-import csv
 import os
+import csv
+import mysql.connector
+import boto3
+from botocore.exceptions import NoCredentialsError
 
-# ── Configuración MySQL ──────────────────────────────────────────────────────
-DB_HOST     = os.environ.get("DB_HOST",     "localhost")
-DB_PORT     = int(os.environ.get("DB_PORT", "3306"))
-DB_USER     = os.environ.get("DB_USER",     "root")
-DB_PASSWORD = os.environ.get("DB_PASSWORD", "password")
-DB_NAME     = os.environ.get("DB_NAME",     "mi_base_de_datos")
-DB_TABLE    = os.environ.get("DB_TABLE",    "mi_tabla")
+# ── 1. Configuración mediante Variables de Entorno ────────────────────────────
+# Esto evita tener contraseñas "quemadas" (hardcodeadas) en el código.
+DB_HOST    = os.getenv('DB_HOST',    'localhost')
+DB_USER    = os.getenv('DB_USER',    'root')
+DB_PASS    = os.getenv('DB_PASS',    'password')
+DB_NAME    = os.getenv('DB_NAME',    'mi_base_de_datos')
+TABLE_NAME = os.getenv('TABLE_NAME', 'mi_tabla')
 
-# ── Configuración S3 ─────────────────────────────────────────────────────────
-NOMBRE_BUCKET = os.environ.get("S3_BUCKET", "nombreBucket")   # <-- reemplaza si no usas variable de entorno
-NOMBRE_ARCHIVO_CSV  = "data.csv"
-S3_KEY              = NOMBRE_ARCHIVO_CSV   # ruta dentro del bucket
+# Credenciales de AWS
+AWS_ACCESS_KEY    = os.getenv('AWS_ACCESS_KEY_ID')
+AWS_SECRET_KEY    = os.getenv('AWS_SECRET_ACCESS_KEY')
+AWS_SESSION_TOKEN = os.getenv('AWS_SESSION_TOKEN')   # Necesario en AWS Academy
+S3_BUCKET         = os.getenv('S3_BUCKET', 'nombre-de-tu-bucket')
+
+CSV_FILENAME = 'datos_exportados.csv'
 
 
-def leer_mysql_y_guardar_csv(archivo_csv: str) -> None:
-    """Conecta a MySQL, lee todos los registros de la tabla y los guarda en CSV."""
-    print(f"Conectando a MySQL en {DB_HOST}:{DB_PORT}, base: {DB_NAME}, tabla: {DB_TABLE}...")
+def extraer_mysql_a_csv():
+    print(f"Conectando a MySQL en {DB_HOST}...")
+    try:
+        conexion = mysql.connector.connect(
+            host=DB_HOST,
+            user=DB_USER,
+            password=DB_PASS,
+            database=DB_NAME
+        )
+        cursor = conexion.cursor()
 
-    conexion = mysql.connector.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        database=DB_NAME,
+        # Ejecutar la consulta
+        print(f"Extrayendo registros de la tabla '{TABLE_NAME}'...")
+        cursor.execute(f"SELECT * FROM {TABLE_NAME}")
+        resultados = cursor.fetchall()
+
+        # Obtener los nombres de las columnas para la cabecera del CSV
+        nombres_columnas = [i[0] for i in cursor.description]
+
+        # Guardar en CSV
+        with open(CSV_FILENAME, 'w', newline='', encoding='utf-8') as archivo_csv:
+            writer = csv.writer(archivo_csv)
+            writer.writerow(nombres_columnas)   # Escribimos la cabecera
+            writer.writerows(resultados)        # Escribimos las filas
+
+        print(f"Datos guardados exitosamente en {CSV_FILENAME}")
+
+        cursor.close()
+        conexion.close()
+
+    except mysql.connector.Error as err:
+        print(f"Error de base de datos: {err}")
+        raise
+
+
+def subir_a_s3():
+    print(f"Subiendo {CSV_FILENAME} a S3 (Bucket: {S3_BUCKET})...")
+    s3 = boto3.client(
+        's3',
+        aws_access_key_id=AWS_ACCESS_KEY,
+        aws_secret_access_key=AWS_SECRET_KEY,
+        aws_session_token=AWS_SESSION_TOKEN
     )
-    cursor = conexion.cursor()
 
-    cursor.execute(f"SELECT * FROM {DB_TABLE};")
-    columnas = [desc[0] for desc in cursor.description]
-    filas    = cursor.fetchall()
-
-    cursor.close()
-    conexion.close()
-
-    print(f"Registros leídos: {len(filas)}")
-
-    with open(archivo_csv, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(columnas)   # cabecera
-        writer.writerows(filas)
-
-    print(f"Archivo CSV generado: {archivo_csv}")
-
-
-def subir_a_s3(archivo_local: str, bucket: str, clave_s3: str) -> None:
-    """Sube el archivo CSV al bucket S3 indicado."""
-    print(f"Subiendo '{archivo_local}' al bucket '{bucket}' como '{clave_s3}'...")
-    cliente_s3 = boto3.client("s3")
-    cliente_s3.upload_file(archivo_local, bucket, clave_s3)
-    print("Ingesta completada")
+    try:
+        s3.upload_file(CSV_FILENAME, S3_BUCKET, CSV_FILENAME)
+        print("¡Subida a S3 completada con éxito!")
+    except FileNotFoundError:
+        print("El archivo CSV no se encontró localmente.")
+    except NoCredentialsError:
+        print("Error: Credenciales de AWS no disponibles o inválidas.")
 
 
 if __name__ == "__main__":
-    leer_mysql_y_guardar_csv(NOMBRE_ARCHIVO_CSV)
-    subir_a_s3(NOMBRE_ARCHIVO_CSV, NOMBRE_BUCKET, S3_KEY)
+    extraer_mysql_a_csv()
+    subir_a_s3()
